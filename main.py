@@ -18,7 +18,6 @@ bot = telebot.TeleBot(os.getenv('BOT_TOKEN'))
 client = MongoClient(os.getenv('MONGO_URI'))
 db = client['worldchat_master_db']
 users_col = db['users']
-ADMIN_ID = 8186837510 
 
 active_pairs, searching_users, last_msg_time = {}, [], {}
 
@@ -29,7 +28,7 @@ def get_user(user_id, name="User", referrer=None):
         users_col.insert_one(user)
         if referrer:
             users_col.update_one({"user_id": int(referrer)}, {"$inc": {"balance": 500}})
-            try: bot.send_message(referrer, f"🎊 *Referral!* +500 coins! 💰", parse_mode="Markdown")
+            try: bot.send_message(referrer, "🎊 *Referral!* +500 coins! 💰", parse_mode="Markdown")
             except: pass
     return user
 
@@ -42,6 +41,30 @@ def start(message):
     get_user(uid, message.from_user.first_name, ref)
     bot.reply_to(message, "🌟 *WORLDCHAT MASTER*\n\n🔍 `/find` | 🛑 `/stop` | 👤 `/profile` | 🎲 `/dice [amt]`\n📢 `/referral` | 🌐 `/setlang` | 🎁 `/daily`", parse_mode="Markdown")
 
+# --- NEW: ANY LANGUAGE SYSTEM ---
+@bot.message_handler(commands=['setlang'])
+def set_lang_start(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("English 🇺🇸", callback_data="lang_en"),
+               types.InlineKeyboardButton("Hindi 🇮🇳", callback_data="lang_hi"))
+    msg = bot.reply_to(message, "🌐 Choose a button OR **type any language name** (e.g., Arabic, French, Spanish):", 
+                       reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, set_lang_custom)
+
+def set_lang_custom(message):
+    if message.text.startswith('/'): return 
+    new_lang = message.text.lower().strip()
+    users_col.update_one({"user_id": message.from_user.id}, {"$set": {"lang": new_lang}})
+    bot.reply_to(message, f"✅ Language set to: **{new_lang.title()}**", parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
+def lang_call(call):
+    new_lang = call.data.split("_")[1]
+    users_col.update_one({"user_id": call.from_user.id}, {"$set": {"lang": new_lang}})
+    bot.answer_callback_query(call.id, f"Language set to {new_lang.upper()}")
+    bot.edit_message_text(f"✅ Language: *{new_lang.upper()}*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+# --- CORE LOGIC ---
 @bot.message_handler(commands=['find'])
 def find_partner(message):
     uid = message.from_user.id
@@ -66,7 +89,6 @@ def stop_chat(message):
         bot.send_message(message.from_user.id, "🛑 Ended.")
         bot.send_message(p_id, "🛑 Partner left.")
 
-# --- GAMING SYSTEM ---
 @bot.message_handler(commands=['dice'])
 def dice_game(message):
     uid, u = message.from_user.id, get_user(message.from_user.id)
@@ -79,7 +101,6 @@ def dice_game(message):
         bot.reply_to(message, f"🎲 You: {r} | Bot: {b}\n*{res}*", parse_mode="Markdown")
     except: bot.reply_to(message, "Usage: `/dice 100`")
 
-# --- TRANSLATION RELAY ---
 @bot.message_handler(content_types=['text', 'photo', 'video', 'voice'])
 def relay(message):
     uid = message.from_user.id
@@ -87,13 +108,14 @@ def relay(message):
         p_id = active_pairs[uid]
         p_lang = get_user(p_id)['lang']
         if message.content_type == 'text':
-            t = GoogleTranslator(source='auto', target=p_lang).translate(message.text)
-            bot.send_message(p_id, f"🌐 {t}")
+            try:
+                t = GoogleTranslator(source='auto', target=p_lang).translate(message.text)
+                bot.send_message(p_id, f"🌐 {t}")
+            except: bot.send_message(p_id, message.text)
         elif message.content_type == 'photo': bot.send_photo(p_id, message.photo[-1].file_id)
         elif message.content_type == 'video': bot.send_video(p_id, message.video.file_id)
         elif message.content_type == 'voice': bot.send_voice(p_id, message.voice.file_id)
 
-# --- PROFILE SETUP ---
 @bot.message_handler(commands=['profile'])
 def profile(m):
     msg = bot.send_message(m.chat.id, "👤 Name?")
