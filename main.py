@@ -1,4 +1,4 @@
-import os, telebot, random, time, threading
+import os, telebot, threading
 from telebot import types
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -6,137 +6,289 @@ from deep_translator import GoogleTranslator
 from flask import Flask
 from datetime import datetime, timedelta
 
-# 1. Infrastructure
+# ------------------ KEEP ALIVE ------------------
 app = Flask('')
 @app.route('/')
-def home(): return "WorldChat Master is Online 🚀"
-def run_web(): app.run(host='0.0.0.0', port=8080)
+def home():
+    return "WorldChat Ultimate Live 🚀"
 
-# 2. Configuration
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+# ------------------ CONFIG ------------------
 load_dotenv()
-bot = telebot.TeleBot(os.getenv('BOT_TOKEN'))
-client = MongoClient(os.getenv('MONGO_URI'))
-db = client['worldchat_master_db']
-users_col = db['users']
+TOKEN = os.getenv("BOT_TOKEN")
+MONGO = os.getenv("MONGO_URI")
 
-active_pairs, searching_users, last_msg_time = {}, [], {}
+if not TOKEN:
+    raise ValueError("BOT_TOKEN missing")
 
-def get_user(user_id, name="User", referrer=None):
-    user = users_col.find_one({"user_id": user_id})
+bot = telebot.TeleBot(TOKEN)
+client = MongoClient(MONGO)
+db = client["worldchat_ultimate"]
+
+users = db["users"]
+likes = db["likes"]
+
+users.create_index("user_id", unique=True)
+
+ADMIN_ID = 8186837510  # 🔴 PUT YOUR TELEGRAM ID
+
+# ------------------ GLOBAL ------------------
+active_pairs = {}
+searching = []
+
+# ------------------ MENU ------------------
+def menu():
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(
+        types.InlineKeyboardButton("💬 Start", callback_data="start"),
+        types.InlineKeyboardButton("🔄 Next", callback_data="next"),
+        types.InlineKeyboardButton("🪙 Coins", callback_data="coins"),
+        types.InlineKeyboardButton("❤️ Match", callback_data="match"),
+        types.InlineKeyboardButton("🎁 Refer", callback_data="refer"),
+        types.InlineKeyboardButton("💎 Premium", callback_data="premium"),
+        types.InlineKeyboardButton("🛑 Stop", callback_data="stop")
+    )
+    return m
+
+# ------------------ FAKE USERS ------------------
+def add_fake_users():
+    fake = [
+        {"user_id": 9001, "name": "Riya", "age": "19", "gender": "Girl"},
+        {"user_id": 9002, "name": "Anjali", "age": "21", "gender": "Girl"},
+        {"user_id": 9003, "name": "Priya", "age": "20", "gender": "Girl"}
+    ]
+    for f in fake:
+        if not users.find_one({"user_id": f["user_id"]}):
+            users.insert_one({
+                "user_id": f["user_id"],
+                "name": f["name"],
+                "age": f["age"],
+                "gender": f["gender"],
+                "balance": 1000,
+                "lang": "en",
+                "premium": False,
+                "last_bonus": datetime.now() - timedelta(days=1)
+            })
+
+add_fake_users()
+
+# ------------------ USER ------------------
+def get_user(uid, name="User", ref=None):
+    user = users.find_one({"user_id": uid})
     if not user:
-        user = {"user_id": user_id, "name": name, "balance": 500, "lang": "en", "last_bonus": datetime.now() - timedelta(days=1)}
-        users_col.insert_one(user)
-        if referrer:
-            users_col.update_one({"user_id": int(referrer)}, {"$inc": {"balance": 500}})
-            try: bot.send_message(referrer, "🎊 *Referral!* +500 coins! 💰", parse_mode="Markdown")
-            except: pass
+        user = {
+            "user_id": uid,
+            "name": name,
+            "age": "??",
+            "gender": "Not Set",
+            "balance": 1000,
+            "lang": "en",
+            "premium": False,
+            "free_chats": 0,
+            "last_bonus": datetime.now() - timedelta(days=1)
+        }
+        users.insert_one(user)
+
+        if ref and str(ref).isdigit() and int(ref) != uid:
+            users.update_one({"user_id": int(ref)}, {"$inc": {"balance": 500}})
+            try:
+                bot.send_message(ref, "🎉 Referral Bonus +500 coins")
+            except:
+                pass
     return user
 
-# --- COMMANDS ---
+# ------------------ START ------------------
 @bot.message_handler(commands=['start'])
-def start(message):
-    uid = message.from_user.id
-    args = message.text.split()
-    ref = int(args[1]) if len(args) > 1 and args[1].isdigit() and int(args[1]) != uid else None
-    get_user(uid, message.from_user.first_name, ref)
-    bot.reply_to(message, "🌟 *WORLDCHAT MASTER*\n\n🔍 `/find` | 🛑 `/stop` | 👤 `/profile` | 🎲 `/dice [amt]`\n📢 `/referral` | 🌐 `/setlang` | 🎁 `/daily`", parse_mode="Markdown")
+def start(msg):
+    uid = msg.from_user.id
+    args = msg.text.split()
+    ref = args[1] if len(args) > 1 else None
 
-# --- NEW: ANY LANGUAGE SYSTEM ---
-@bot.message_handler(commands=['setlang'])
-def set_lang_start(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("English 🇺🇸", callback_data="lang_en"),
-               types.InlineKeyboardButton("Hindi 🇮🇳", callback_data="lang_hi"))
-    msg = bot.reply_to(message, "🌐 Choose a button OR **type any language name** (e.g., Arabic, French, Spanish):", 
-                       reply_markup=markup, parse_mode="Markdown")
-    bot.register_next_step_handler(msg, set_lang_custom)
+    get_user(uid, msg.from_user.first_name, ref)
 
-def set_lang_custom(message):
-    if message.text.startswith('/'): return 
-    new_lang = message.text.lower().strip()
-    users_col.update_one({"user_id": message.from_user.id}, {"$set": {"lang": new_lang}})
-    bot.reply_to(message, f"✅ Language set to: **{new_lang.title()}**", parse_mode="Markdown")
+    bot.send_message(uid,
+        "🔥 *Welcome to Secret Chat*\n\n"
+        "😈 Talk to strangers privately\n"
+        "❤️ Find girlfriend/boyfriend\n"
+        "💬 Unlimited anonymous chat\n\n"
+        "🚀 Press START below",
+        parse_mode="Markdown",
+        reply_markup=menu()
+    )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
-def lang_call(call):
-    new_lang = call.data.split("_")[1]
-    users_col.update_one({"user_id": call.from_user.id}, {"$set": {"lang": new_lang}})
-    bot.answer_callback_query(call.id, f"Language set to {new_lang.upper()}")
-    bot.edit_message_text(f"✅ Language: *{new_lang.upper()}*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+# ------------------ MATCHMAKING ------------------
+def find_partner(uid):
+    u = get_user(uid)
 
-# --- CORE LOGIC ---
-@bot.message_handler(commands=['find'])
-def find_partner(message):
-    uid = message.from_user.id
-    if uid in active_pairs: return bot.reply_to(message, "❌ Already in chat!")
-    if searching_users:
-        p_id = searching_users.pop(0)
-        if p_id == uid: return
-        active_pairs[uid], active_pairs[p_id] = p_id, uid
-        u_d, p_d = get_user(uid), get_user(p_id)
-        intro = lambda d: f"👤 {d.get('name','Stranger')} ({d.get('age','??')}, {d.get('gender','Unknown')})"
-        bot.send_message(uid, f"✅ *Connected!*\n{intro(p_d)}", parse_mode="Markdown")
-        bot.send_message(p_id, f"✅ *Connected!*\n{intro(u_d)}", parse_mode="Markdown")
-    else:
-        if uid not in searching_users: searching_users.append(uid)
-        bot.reply_to(message, "🔍 Searching...")
+    if not u.get("premium"):
+        if u.get("free_chats", 0) >= 3:
+            bot.send_message(uid, "🚫 Free limit reached! Buy Premium 💎")
+            return
 
-@bot.message_handler(commands=['stop'])
-def stop_chat(message):
-    if message.from_user.id in active_pairs:
-        p_id = active_pairs.pop(message.from_user.id)
-        active_pairs.pop(p_id, None)
-        bot.send_message(message.from_user.id, "🛑 Ended.")
-        bot.send_message(p_id, "🛑 Partner left.")
-
-@bot.message_handler(commands=['dice'])
-def dice_game(message):
-    uid, u = message.from_user.id, get_user(message.from_user.id)
-    try:
-        amt = int(message.text.split()[1])
-        if amt > u['balance'] or amt <= 0: return bot.reply_to(message, "❌ Not enough coins!")
-        b, r = random.randint(1,6), random.randint(1,6)
-        res = "WON! 🎉" if r > b else ("LOST! 💀" if r < b else "DRAW! 🤝")
-        users_col.update_one({"user_id": uid}, {"$inc": {"balance": amt if r > b else (-amt if r < b else 0)}})
-        bot.reply_to(message, f"🎲 You: {r} | Bot: {b}\n*{res}*", parse_mode="Markdown")
-    except: bot.reply_to(message, "Usage: `/dice 100`")
-
-@bot.message_handler(content_types=['text', 'photo', 'video', 'voice'])
-def relay(message):
-    uid = message.from_user.id
     if uid in active_pairs:
-        p_id = active_pairs[uid]
-        p_lang = get_user(p_id)['lang']
-        if message.content_type == 'text':
-            try:
-                t = GoogleTranslator(source='auto', target=p_lang).translate(message.text)
-                bot.send_message(p_id, f"🌐 {t}")
-            except: bot.send_message(p_id, message.text)
-        elif message.content_type == 'photo': bot.send_photo(p_id, message.photo[-1].file_id)
-        elif message.content_type == 'video': bot.send_video(p_id, message.video.file_id)
-        elif message.content_type == 'voice': bot.send_voice(p_id, message.voice.file_id)
+        bot.send_message(uid, "❌ Already chatting")
+        return
 
-@bot.message_handler(commands=['profile'])
-def profile(m):
-    msg = bot.send_message(m.chat.id, "👤 Name?")
-    bot.register_next_step_handler(msg, lambda m: bot.register_next_step_handler(bot.send_message(m.chat.id, f"Age?"), save_prof, m.text))
+    if searching:
+        p = searching.pop(0)
+        if p == uid:
+            return
 
-def save_prof(m, name):
-    users_col.update_one({"user_id": m.from_user.id}, {"$set": {"name": name, "age": m.text}}, upsert=True)
-    bot.send_message(m.chat.id, "✅ Saved!")
+        active_pairs[uid] = p
+        active_pairs[p] = uid
 
+        users.update_one({"user_id": uid}, {"$inc": {"free_chats": 1}})
+
+        bot.send_message(uid, "✅ Connected!")
+        bot.send_message(p, "✅ Connected!")
+
+        bot.send_message(uid, "🔥 Many girls are online now!\nUpgrade to Premium for faster matches 💎")
+
+    else:
+        searching.append(uid)
+        bot.send_message(uid, "🔍 Searching...")
+
+def stop_chat(uid):
+    if uid in active_pairs:
+        p = active_pairs.pop(uid)
+        active_pairs.pop(p, None)
+
+        bot.send_message(uid, "🛑 Chat ended")
+        bot.send_message(p, "❌ Partner left")
+
+# ------------------ TINDER MATCH ------------------
+def show_profile(uid):
+    other = users.find_one({"user_id": {"$ne": uid}})
+    if not other:
+        bot.send_message(uid, "❌ No users found")
+        return
+
+    m = types.InlineKeyboardMarkup()
+    m.add(
+        types.InlineKeyboardButton("❤️ Like", callback_data=f"like_{other['user_id']}"),
+        types.InlineKeyboardButton("❌ Skip", callback_data="skip")
+    )
+
+    bot.send_message(uid, f"👤 {other['name']} ({other['age']})", reply_markup=m)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("like_"))
+def like_user(call):
+    uid = call.from_user.id
+    target = int(call.data.split("_")[1])
+
+    likes.insert_one({"from": uid, "to": target})
+
+    if likes.find_one({"from": target, "to": uid}):
+        active_pairs[uid] = target
+        active_pairs[target] = uid
+
+        bot.send_message(uid, "❤️ MATCH! Start chatting!")
+        bot.send_message(target, "❤️ MATCH! Start chatting!")
+    else:
+        bot.send_message(uid, "👍 Liked!")
+
+# ------------------ BUTTONS ------------------
+@bot.callback_query_handler(func=lambda c: True)
+def buttons(call):
+    uid = call.from_user.id
+
+    if call.data == "start":
+        find_partner(uid)
+
+    elif call.data == "next":
+        stop_chat(uid)
+        find_partner(uid)
+
+    elif call.data == "stop":
+        stop_chat(uid)
+
+    elif call.data == "coins":
+        u = get_user(uid)
+        bot.send_message(uid, f"🪙 Coins: {u['balance']}")
+
+    elif call.data == "refer":
+        link = f"https://t.me/{bot.get_me().username}?start={uid}"
+        bot.send_message(uid, f"🔗 Invite:\n{link}")
+
+    elif call.data == "premium":
+        bot.send_message(uid,
+            "💎 *Premium Benefits*\n\n"
+            "🔥 Chat with girls first\n"
+            "🚀 Faster matching\n"
+            "💬 No waiting\n"
+            "❤️ Unlimited matches\n\n"
+            "💰 Price: ₹49 only\n\n"
+            "UPI: yourupi@upi\nSend screenshot after payment",
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "match":
+        show_profile(uid)
+
+# ------------------ PAYMENT ------------------
+@bot.message_handler(content_types=['photo'])
+def payment(msg):
+    users.update_one({"user_id": msg.from_user.id},
+                     {"$set": {"payment_pending": True}})
+
+    bot.send_message(ADMIN_ID, f"💰 Payment request from {msg.from_user.id}")
+
+@bot.message_handler(commands=['approve'])
+def approve(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+
+    uid = int(msg.text.split()[1])
+
+    users.update_one({"user_id": uid},
+                     {"$set": {"premium": True, "payment_pending": False}})
+
+    bot.send_message(uid, "💎 Premium Activated!")
+
+# ------------------ DAILY ------------------
 @bot.message_handler(commands=['daily'])
-def daily(m):
-    u = get_user(m.from_user.id)
-    if datetime.now() - u.get('last_bonus', datetime.now()) >= timedelta(days=1):
-        users_col.update_one({"user_id": m.from_user.id}, {"$inc": {"balance": 100}, "$set": {"last_bonus": datetime.now()}})
-        bot.reply_to(m, "🎁 +100 Coins!")
-    else: bot.reply_to(m, "⏳ Come back tomorrow!")
+def daily(msg):
+    u = get_user(msg.from_user.id)
 
-@bot.message_handler(commands=['referral'])
-def ref(m):
-    bot.reply_to(m, f"🔗 `https://t.me/{bot.get_me().username}?start={m.from_user.id}`\nEarn 500 coins!", parse_mode="Markdown")
+    if datetime.now() - u['last_bonus'] >= timedelta(days=1):
+        users.update_one({"user_id": msg.from_user.id},
+                         {"$inc": {"balance": 200},
+                          "$set": {"last_bonus": datetime.now()}})
+        bot.reply_to(msg, "🎁 +200 coins added")
+    else:
+        bot.reply_to(msg, "⏳ Come tomorrow")
 
+# ------------------ LEADERBOARD ------------------
+@bot.message_handler(commands=['top'])
+def top(msg):
+    top_users = users.find().sort("balance", -1).limit(5)
+
+    text = "🏆 Top Users:\n"
+    for i, u in enumerate(top_users, 1):
+        text += f"{i}. {u['name']} - {u['balance']}\n"
+
+    bot.send_message(msg.chat.id, text)
+
+# ------------------ CHAT ------------------
+@bot.message_handler(content_types=['text'])
+def chat(msg):
+    uid = msg.from_user.id
+
+    if uid in active_pairs:
+        p = active_pairs[uid]
+        lang = get_user(p).get("lang", "en")
+
+        try:
+            t = GoogleTranslator(source='auto', target=lang).translate(msg.text)
+        except:
+            t = msg.text
+
+        bot.send_message(p, f"🌐 {t}")
+
+# ------------------ RUN ------------------
 if __name__ == "__main__":
     threading.Thread(target=run_web).start()
-    bot.infinity_polling()
+    print("Bot running...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
