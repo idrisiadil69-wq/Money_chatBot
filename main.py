@@ -189,3 +189,15 @@ def broadcast(message):
 if __name__ == "__main__":
     Thread(target=run_web).start()
     bot.infinity_polling()
+
+# --- ADDED COMMANDS ---
+
+@bot.message_handler(commands=['referral'])
+def referral_menu(message):
+    referral_link = f"https://t.me/Worldchat_bot?start={message.chat.id}"
+    bot.reply_to(message, f"🔗 *Invite friends to WorldChat!*\n\nYour personal link:\n`{referral_link}`\n\nFor every friend you bring, you earn *500 coins*! 💰", parse_mode="Markdown")
+
+@bot.message_handler(commands=['vip'])
+def vip_menu(message):
+    bot.reply_to(message, "💎 *WorldChat VIP Status*\n\nComing soon! VIP members will get:\n✅ Filter partners by country\n✅ Unlimited daily coins\n✅ Ad-free experience\n\nStay tuned for updates! 🚀", parse_mode="Markdown")
+    
