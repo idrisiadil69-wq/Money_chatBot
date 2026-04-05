@@ -1,36 +1,37 @@
 import os
 import telebot
 import random
+import time
 from telebot import types
 from pymongo import MongoClient, DESCENDING
 from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from flask import Flask
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# 1. Infrastructure Setup (Keeps bot alive on Render)
+# 1. Infrastructure
 app = Flask('')
 @app.route('/')
-def home(): return "WorldChat Ultimate Royal is Online 🚀👑"
+def home(): return "WorldChat Viral-God is Online 🚀🔥🔒"
 def run_web(): app.run(host='0.0.0.0', port=8080)
 
-# 2. Configuration & Database
+# 2. Config
 load_dotenv()
 bot = telebot.TeleBot(os.getenv('BOT_TOKEN'))
 client = MongoClient(os.getenv('MONGO_URI'))
-db = client['worldchat_final_db']
+db = client['worldchat_viral_db']
 users_col = db['users']
 
-# !!! IMPORTANT: REPLACE 123456789 WITH YOUR REAL TELEGRAM ID !!!
 ADMIN_ID = 8186837510 
 
-# Global state for Anonymous Chat pairing
+# Global state
 active_pairs = {}
 searching_users = []
+last_msg_time = {}
 
-# 3. Database Helper
-def get_user(user_id, name="User"):
+# 3. Database & Referral Logic
+def get_user(user_id, name="User", referrer=None):
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = {
@@ -39,43 +40,70 @@ def get_user(user_id, name="User"):
             "balance": 500, 
             "lang": "hi", 
             "vip": False,
-            "joined": datetime.now().strftime("%Y-%m-%d")
+            "last_bonus": datetime.now() - timedelta(days=1),
+            "referred_by": referrer
         }
         users_col.insert_one(user)
+        
+        # If this is a new user from a referral, pay the referrer
+        if referrer:
+            users_col.update_one({"user_id": int(referrer)}, {"$inc": {"balance": 500}})
+            try:
+                bot.send_message(referrer, f"🎊 *Referral Success!* {name} joined. You earned 500 coins! 💰", parse_mode="Markdown")
+            except: pass
     return user
 
-# --- COMMANDS ---
+# --- REFERRAL & SHARE COMMAND ---
+
+@bot.message_handler(commands=['invite'])
+def invite_friends(message):
+    uid = message.from_user.id
+    bot_username = bot.get_me().username
+    referral_link = f"https://t.me/{bot_username}?start={uid}"
+    
+    markup = types.InlineKeyboardMarkup()
+    # This button opens the Telegram "Forward/Share" menu
+    share_url = f"https://t.me/share/url?url={referral_link}&text=Hey! Join this Anonymous Chat bot and earn coins! 👑"
+    markup.add(types.InlineKeyboardButton("🔗 Share with Friends", url=share_url))
+    
+    text = (
+        "📢 *INVITE & EARN*\n\n"
+        "Share your link with friends. When they join, you get **500 coins** instantly!\n\n"
+        f"Your Link: `{referral_link}`"
+    )
+    bot.reply_to(message, text, reply_markup=markup, parse_mode="Markdown")
+
+# --- CORE LOGIC ---
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    get_user(message.from_user.id, message.from_user.first_name)
+    uid = message.from_user.id
+    args = message.text.split()
+    referrer = None
+    
+    # Check if user clicked a referral link
+    if len(args) > 1 and args[1].isdigit():
+        if int(args[1]) != uid: # Prevent self-referral
+            referrer = int(args[1])
+
+    get_user(uid, message.from_user.first_name, referrer)
+    
     msg = (
-        "🌟 *WELCOME TO WORLDCHAT ULTIMATE* 🌟\n\n"
-        "🎮 `/dice [amount]` - Bet coins on a roll\n"
-        "🔍 `/find` - Chat with a random stranger\n"
-        "🛑 `/stop` - End the random chat\n"
-        "👑 `/buy` - Purchase Coins or VIP Crown\n"
-        "👤 `/profile` - See your stats & coins\n"
-        "🏆 `/top` - Global Leaderboard\n"
+        "🌟 *WORLDCHAT VIRAL EDITION* 🌟\n\n"
+        "🎮 `/dice` | 🎁 `/daily` | 📢 `/invite`\n"
+        "🔍 `/find` | 🛑 `/stop` | 🌐 `/setlang`\n"
+        "👑 `/buy` | 👤 `/profile` | 🏆 `/top`\n"
         "━━━━━━━━━━━━━━\n"
-        "💬 *Send any text to translate it!*"
+        "💰 *EARN 500 COINS* for every friend you invite!"
     )
     bot.reply_to(message, msg, parse_mode="Markdown")
 
-# --- VIP & SHOP (AUTO-PAYMENT VIA TELEGRAM STARS) ---
+# --- SHOP, GAMES & ADMIN (REMAINS SAME) ---
 
 @bot.message_handler(commands=['buy'])
 def buy_menu(message):
-    # Invoice for Coins
-    bot.send_invoice(
-        message.chat.id, "💰 5,000 WorldCoins", "Refill your balance to play games!", 
-        "coins_pack", "", "XTR", [types.LabeledPrice(label="5,000 Coins", amount=50)]
-    )
-    # Invoice for VIP Crown
-    bot.send_invoice(
-        message.chat.id, "👑 VIP Crown Status", "Get a permanent Crown icon & Badge!", 
-        "vip_pack", "", "XTR", [types.LabeledPrice(label="VIP Crown 👑", amount=150)]
-    )
+    bot.send_invoice(message.chat.id, "💰 5k Coins", "Refill", "coins_pack", "", "XTR", [types.LabeledPrice(label="5k Coins", amount=50)])
+    bot.send_invoice(message.chat.id, "👑 VIP Crown", "Badge", "vip_pack", "", "XTR", [types.LabeledPrice(label="VIP Crown", amount=150)])
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def checkout(pre_checkout_query):
@@ -87,79 +115,50 @@ def payment_success(message):
     payload = message.successful_payment.invoice_payload
     if payload == "coins_pack":
         users_col.update_one({"user_id": uid}, {"$inc": {"balance": 5000}})
-        bot.send_message(uid, "✅ *Payment Success!* 5,000 coins added to your wallet. 💰", parse_mode="Markdown")
+        bot.send_message(uid, "✅ 5,000 coins added!")
     elif payload == "vip_pack":
         users_col.update_one({"user_id": uid}, {"$set": {"vip": True}})
-        bot.send_message(uid, "🎊 *CONGRATULATIONS!* You are now a VIP with a 👑 Crown!", parse_mode="Markdown")
+        bot.send_message(uid, "🎊 You are now a VIP 👑!")
 
-# --- ADMIN POWER COMMANDS ---
+@bot.message_handler(commands=['daily'])
+def daily_bonus(message):
+    uid = message.from_user.id
+    user = get_user(uid)
+    now = datetime.now()
+    if now - user.get('last_bonus', now - timedelta(days=1)) >= timedelta(days=1):
+        users_col.update_one({"user_id": uid}, {"$inc": {"balance": 100}, "$set": {"last_bonus": now}})
+        bot.reply_to(message, "🎁 +100 Coins Daily Bonus!")
+    else: bot.reply_to(message, "⏳ Come back tomorrow!")
 
-@bot.message_handler(commands=['makevip'])
-def manual_vip(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        target_id = int(message.text.split()[1])
-        users_col.update_one({"user_id": target_id}, {"$set": {"vip": True}})
-        bot.reply_to(message, f"✅ User {target_id} is now a VIP! 👑")
-        bot.send_message(target_id, "👑 *The Admin has granted you VIP status!*", parse_mode="Markdown")
-    except: bot.reply_to(message, "Usage: `/makevip [User_ID]`")
+@bot.message_handler(commands=['setlang'])
+def set_lang(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("English 🇺🇸", callback_data="lang_en"),
+               types.InlineKeyboardButton("Hindi 🇮🇳", callback_data="lang_hi"))
+    bot.reply_to(message, "Select Language:", reply_markup=markup)
 
-@bot.message_handler(commands=['unvip'])
-def remove_vip(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        target_id = int(message.text.split()[1])
-        users_col.update_one({"user_id": target_id}, {"$set": {"vip": False}})
-        bot.reply_to(message, f"❌ VIP removed from {target_id}")
-    except: bot.reply_to(message, "Usage: `/unvip [User_ID]`")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
+def lang_call(call):
+    new_lang = call.data.split("_")[1]
+    users_col.update_one({"user_id": call.from_user.id}, {"$set": {"lang": new_lang}})
+    bot.answer_callback_query(call.id, f"Set to {new_lang}")
 
-@bot.message_handler(commands=['broadcast'])
-def admin_broadcast(message):
-    if message.from_user.id != ADMIN_ID: return
-    text = message.text.replace('/broadcast ', '')
-    all_users = users_col.find()
-    count = 0
-    for u in all_users:
-        try:
-            bot.send_message(u['user_id'], f"📢 *ANNOUNCEMENT:*\n\n{text}", parse_mode="Markdown")
-            count += 1
-        except: continue
-    bot.reply_to(message, f"✅ Sent to {count} users.")
-
-# --- SOCIAL & LEADERBOARD ---
-
-@bot.message_handler(commands=['top'])
-def leaderboard(message):
-    top_users = users_col.find().sort("balance", DESCENDING).limit(10)
-    text = "🏆 *WORLD LEADERBOARD*\n━━━━━━━━━━━━━━\n"
-    for i, u in enumerate(top_users, 1):
-        icon = "👑" if u.get('vip') else "👤"
-        text += f"{i}. {icon} {u.get('name', 'User')} - {u['balance']} 💰\n"
-    bot.reply_to(message, text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['profile'])
-def profile(message):
-    u = get_user(message.from_user.id)
-    badge = "👑 VIP MEMBER" if u.get('vip') else "🆓 FREE USER"
-    bot.reply_to(message, f"👤 *{u.get('name')}*\n✨ {badge}\n💰 Wallet: {u['balance']} coins", parse_mode="Markdown")
-
-# --- ANONYMOUS CHAT LOGIC ---
+# --- PRIVACY CHAT RELAY ---
 
 @bot.message_handler(commands=['find'])
 def find_partner(message):
     uid = message.from_user.id
     if uid in active_pairs:
-        bot.reply_to(message, "❌ Already in chat! Use /stop.")
+        bot.reply_to(message, "❌ Use /stop first.")
         return
     if searching_users:
-        partner_id = searching_users.pop(0)
-        active_pairs[uid] = partner_id
-        active_pairs[partner_id] = uid
-        bot.send_message(uid, "✅ *Connected!* Messages are translated. Say hello!")
-        bot.send_message(partner_id, "✅ *Connected!* Messages are translated. Say hello!")
+        p_id = searching_users.pop(0)
+        active_pairs[uid], active_pairs[p_id] = p_id, uid
+        bot.send_message(uid, "✅ *Connected!* Privacy Shield On.")
+        bot.send_message(p_id, "✅ *Connected!* Privacy Shield On.")
     else:
         searching_users.append(uid)
-        bot.reply_to(message, "🔍 Searching for a partner...")
+        bot.reply_to(message, "🔍 Searching...")
 
 @bot.message_handler(commands=['stop'])
 def stop_chat(message):
@@ -168,49 +167,65 @@ def stop_chat(message):
         p_id = active_pairs.pop(uid)
         active_pairs.pop(p_id, None)
         bot.send_message(uid, "🛑 Chat ended.")
-        bot.send_message(p_id, "🛑 Your partner ended the chat.")
-    else: bot.reply_to(message, "You are not in a chat.")
+        bot.send_message(p_id, "🛑 Chat ended.")
 
-# --- DICE GAMBLING ---
-
-@bot.message_handler(commands=['dice'])
-def play_dice(message):
+@bot.message_handler(content_types=['text', 'voice', 'video_note', 'photo', 'document', 'video', 'audio'])
+def handle_relay(message):
     uid = message.from_user.id
-    user = get_user(uid)
-    try:
-        amt = int(message.text.split()[1])
-        if amt > user['balance'] or amt <= 0:
-            bot.reply_to(message, "❌ Insufficient coins!")
-            return
-        b_roll, u_roll = random.randint(1, 6), random.randint(1, 6)
-        if u_roll > b_roll:
-            users_col.update_one({"user_id": uid}, {"$inc": {"balance": amt}})
-            bot.reply_to(message, f"🎲 Me: {b_roll} | You: {u_roll}\n🎉 *YOU WON {amt} COINS!*")
-        elif u_roll < b_roll:
-            users_col.update_one({"user_id": uid}, {"$inc": {"balance": -amt}})
-            bot.reply_to(message, f"🎲 Me: {b_roll} | You: {u_roll}\n💀 *YOU LOST {amt} COINS!*")
-        else: bot.reply_to(message, "🤝 Draw! No coins lost.")
-    except: bot.reply_to(message, "Usage: `/dice 100`")
+    # Anti-Spam
+    cur = time.time()
+    if uid in last_msg_time and cur - last_msg_time[uid] < 0.7: return
+    last_msg_time[uid] = cur
 
-# --- AUTO-TRANSLATION & RELAY ---
-
-@bot.message_handler(func=lambda m: True)
-def relay_text(message):
-    uid = message.from_user.id
-    # If in anonymous chat, relay with translation
     if uid in active_pairs:
         p_id = active_pairs[uid]
         p_data = get_user(p_id)
-        target = p_data.get('lang', 'hi')
-        trans = GoogleTranslator(source='auto', target=target).translate(message.text)
-        bot.send_message(p_id, f"💬: {trans}")
+        if message.content_type == 'text':
+            trans = GoogleTranslator(source='auto', target=p_data['lang']).translate(message.text)
+            bot.send_message(p_id, f"💬: {trans}", protect_content=True)
+        elif message.content_type == 'voice': bot.send_voice(p_id, message.voice.file_id, protect_content=True)
+        elif message.content_type == 'video_note': bot.send_video_note(p_id, message.video_note.file_id, protect_content=True)
+        elif message.content_type == 'photo': bot.send_photo(p_id, message.photo[-1].file_id, protect_content=True)
+        elif message.content_type == 'document': bot.send_document(p_id, message.document.file_id, protect_content=True)
+        elif message.content_type == 'video': bot.send_video(p_id, message.video.file_id, protect_content=True)
     else:
-        # Default solo translation
-        u_data = get_user(uid)
-        trans = GoogleTranslator(source='auto', target=u_data.get('lang', 'hi')).translate(message.text)
-        bot.reply_to(message, trans)
+        if message.content_type == 'text':
+            u_data = get_user(uid)
+            trans = GoogleTranslator(source='auto', target=u_data['lang']).translate(message.text)
+            bot.reply_to(message, trans)
 
-# 5. Boot System
+# --- GAMES & ADMIN ---
+
+@bot.message_handler(commands=['dice'])
+def dice(message):
+    uid = message.from_user.id
+    u = get_user(uid)
+    try:
+        amt = int(message.text.split()[1])
+        if amt > u['balance'] or amt <= 0: return
+        b, r = random.randint(1,6), random.randint(1,6)
+        if r > b: users_col.update_one({"user_id": uid}, {"$inc": {"balance": amt}})
+        elif r < b: users_col.update_one({"user_id": uid}, {"$inc": {"balance": -amt}})
+        bot.reply_to(message, f"🎲 {r} vs {b}")
+    except: pass
+
+@bot.message_handler(commands=['top'])
+def top(message):
+    top_u = users_col.find().sort("balance", DESCENDING).limit(10)
+    t = "🏆 *LEADERBOARD*\n"
+    for i, x in enumerate(top_u, 1):
+        icon = "👑" if x.get('vip') else "👤"
+        t += f"{i}. {icon} {x.get('name')} - {x['balance']}\n"
+    bot.reply_to(message, t, parse_mode="Markdown")
+
+@bot.message_handler(commands=['broadcast'])
+def bdc(message):
+    if message.from_user.id != ADMIN_ID: return
+    txt = message.text.replace('/broadcast ', '')
+    for u in users_col.find():
+        try: bot.send_message(u['user_id'], f"📢 {txt}")
+        except: continue
+
 if __name__ == "__main__":
     Thread(target=run_web).start()
     bot.infinity_polling()
