@@ -1,202 +1,173 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient
-from googletrans import Translator
-import time, threading
 import os
-
-# ===== LOAD SECRETS =====
-# Use .get() with defaults to prevent immediate crashing
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URL = os.environ.get("MONGO_URL")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-UPI_ID = os.environ.get("UPI_ID", "your_upi@id")
-VIP_PRICE = int(os.environ.get("VIP_PRICE", 100))
-
-COIN_COST_PER_CHAT = 1
-REFERRAL_REWARD = 5
-DAILY_COINS = 5
-VIP_DURATION_DAYS = 30
-
-bot = telebot.TeleBot(BOT_TOKEN)
-client = MongoClient(MONGO_URL)
-db = client["dating_bot"]
-users = db["users"]
-
-# We use a single document to manage queues to avoid "NoneType" errors
-queues = db["queues"]
-
-# Initialize queues if they don't exist
-if not queues.find_one({"type": "global"}):
-    queues.insert_one({"type": "global", "males": [], "females": []})
-
-# In-memory active chats (For a production bot, move this to MongoDB)
-active_chats = {} 
-user_last_msg_time = {}
-
-translator = Translator()
-
-# ===== DATABASE FUNCTIONS =====
-def get_user(uid):
-    user = users.find_one({"id": uid})
-    if not user:
-        user = {
-            "id": uid,
-            "gender": None,
-            "bio": "No bio set",
-            "coins": 10,
-            "referrals": 0,
-            "is_vip": False,
-            "vip_expiry": 0,
-            "lang": "en",
-            "translate": True,
-            "banned": False,
-            "last_daily": 0
-        }
-        users.insert_one(user)
-    return user
-
-def update_user(uid, data):
-    users.update_one({"id": uid}, {"$set": data})
-
-def increment_user(uid, field, amount):
-    users.update_one({"id": uid}, {"$inc": {field: amount}})
-
-# ===== KEYBOARDS =====
-def gender_menu():
-    m = InlineKeyboardMarkup()
-    m.add(
-        InlineKeyboardButton("👨 Male", callback_data="set_M"),
-        InlineKeyboardButton("👩 Female", callback_data="set_F")
-    )
-    return m
-
-def main_menu(uid):
-    u = get_user(uid)
-    m = InlineKeyboardMarkup(row_width=2)
-    m.add(
-        InlineKeyboardButton("💬 Start Chat", callback_data="chat"),
-        InlineKeyboardButton("🔄 Next", callback_data="next"),
-        InlineKeyboardButton(f"🪙 Coins: {u['coins']}", callback_data="coins"),
-        InlineKeyboardButton("🎁 Daily Coins", callback_data="daily"),
-        InlineKeyboardButton("🎁 Refer", callback_data="refer"),
-        InlineKeyboardButton(f"🌍 Translate: {'ON' if u['translate'] else 'OFF'}", callback_data="translate"),
-        InlineKeyboardButton("💎 VIP", callback_data="vip"),
-        InlineKeyboardButton("🛑 Stop", callback_data="stop"),
-        InlineKeyboardButton("🌐 Language", callback_data="language"),
-        InlineKeyboardButton("🚨 Report", callback_data="report"),
-        InlineKeyboardButton("🎮 Stats", callback_data="stats")
-    )
-    return m
-
-# ===== CHAT LOGIC (FIXED) =====
-def start_chat(uid):
-    user = get_user(uid)
-    if user["banned"]:
-        return bot.send_message(uid, "🚫 You are banned.")
-    if str(uid) in active_chats:
-        return bot.send_message(uid, "⚠️ Already in chat!")
-    if not user["is_vip"] and user["coins"] < COIN_COST_PER_CHAT:
-        return bot.send_message(uid, "❌ Not enough coins! Use /refer or /daily.")
-
-    gender = user["gender"]
-    q_doc = queues.find_one({"type": "global"})
-    males = q_doc["males"]
-    females = q_doc["females"]
-
-    # Prevent double-queueing
-    if uid in males or uid in females:
-        return bot.send_message(uid, "🔎 Still searching for a partner...")
-
-    target_queue = females if gender == "M" else males
-    my_queue_name = "males" if gender == "M" else "females"
-
-    if target_queue:
-        partner_id = target_queue.pop(0)
-        # Update DB Queues
-        queues.update_one({"type": "global"}, {"$set": {"males": males, "females": females}})
-        
-        # Link them
-        active_chats[str(uid)] = partner_id
-        active_chats[str(partner_id)] = uid
-        
-        if not user["is_vip"]: increment_user(uid, "coins", -COIN_COST_PER_CHAT)
-        
-        p_user = get_user(partner_id)
-        bot.send_message(uid, f"💘 Matched!\nBio: {p_user['bio']}", reply_markup=main_menu(uid))
-        bot.send_message(partner_id, f"💘 Matched!\nBio: {user['bio']}", reply_markup=main_menu(partner_id))
-    else:
-        queues.update_one({"type": "global"}, {"$push": {my_queue_name: uid}})
-        bot.send_message(uid, "🔎 Searching for a partner... please wait.")
-
-# ===== HANDLERS =====
-@bot.message_handler(commands=["start"])
-def start(msg):
-    uid = msg.from_user.id
-    user = get_user(uid)
-    
-    # Simple referral check
-    if " " in msg.text:
-        ref_id = msg.text.split()[1]
-        if ref_id.isdigit() and int(ref_id) != uid and not user.get("ref_claimed"):
-            increment_user(int(ref_id), "coins", REFERRAL_REWARD)
-            update_user(uid, {"ref_claimed": True})
-            bot.send_message(int(ref_id), "🎁 Someone joined via your link! +5 coins.")
-
-    if not user["gender"]:
-        bot.send_message(uid, "👋 Welcome! Select your gender:", reply_markup=gender_menu())
-    else:
-        bot.send_message(uid, "🔥 Welcome Back!", reply_markup=main_menu(uid))
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    uid = call.from_user.id
-    if call.data.startswith("set_"):
-        g = call.data.split("_")[1]
-        update_user(uid, {"gender": g})
-        bot.edit_message_text("✅ Gender saved!", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-    
-    elif call.data == "chat":
-        start_chat(uid)
-    
-    elif call.data == "stop":
-        if str(uid) in active_chats:
-            pid = active_chats.pop(str(uid))
-            active_chats.pop(str(pid), None)
-            bot.send_message(uid, "🛑 Chat ended.", reply_markup=main_menu(uid))
-            bot.send_message(pid, "🛑 Your partner ended the chat.", reply_markup=main_menu(pid))
-        else:
-            bot.answer_callback_query(call.id, "You aren't in a chat.")
-
-@bot.message_handler(content_types=['text', 'photo'])
-def handle_relay(msg):
-    uid = msg.from_user.id
-    if str(uid) in active_chats:
-        pid = active_chats[str(uid)]
-        if msg.text:
-            # Simple relay without translation first to ensure it works
-            bot.send_message(pid, f"💬: {msg.text}")
-        elif msg.photo:
-            bot.send_photo(pid, msg.photo[-1].file_id, caption=msg.caption)
-    else:
-        bot.send_message(uid, "❌ Not in a chat. Click 'Start Chat'", reply_markup=main_menu(uid))
-
-# Start the bot
+import time
+import random
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
+import telebot
+from telebot import types
+from pymongo import MongoClient
+from deep_translator import GoogleTranslator
 
-app = Flask(__name__)
+# --- INITIALIZATION ---
+API_TOKEN = os.getenv('BOT_TOKEN')
+MONGO_URI = os.getenv('MONGO_URI')
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
+LOG_GROUP_ID = int(os.getenv('LOG_GROUP_ID', 0))
 
+bot = telebot.TeleBot(API_TOKEN, parse_mode='HTML')
+client = MongoClient(MONGO_URI)
+db = client['worldchat_master']
+users = db['users']
+
+# --- FLASK KEEP-ALIVE ---
+app = Flask('')
 @app.route('/')
-def home():
-    return "Bot is alive!"
+def home(): return "WorldChat Master is Live 🚀"
+def run_web(): app.run(host='0.0.0.0', port=8080)
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+# --- DATABASE & UTILITY LOGIC ---
+def get_user(user_id):
+    user = users.find_one({"user_id": user_id})
+    if not user:
+        user = {
+            "user_id": user_id, "name": "Guest", "age": 18, "gender": "Unknown",
+            "coins": 100, "is_vip": False, "lang": "en", "partner": None,
+            "referred_by": None, "daily_msgs": 0, "daily_photos": 0,
+            "last_reset": datetime.now(), "reports": 0, "last_daily": 0, "bio": ""
+        }
+        users.insert_one(user)
+    
+    # Daily Limit Reset Logic
+    if (datetime.now() - user.get('last_reset', datetime.now())).days >= 1:
+        users.update_one({"user_id": user_id}, {"$set": {"daily_msgs": 0, "daily_photos": 0, "last_reset": datetime.now()}})
+        user['daily_msgs'], user['daily_photos'] = 0, 0
+        
+    return user
 
-# Run the web server in a separate thread
-t = Thread(target=run)
-t.start()
+def translate_msg(text, target):
+    try: return GoogleTranslator(source='auto', target=target).translate(text)
+    except: return text
 
-print("Bot Started...")
-bot.infinity_polling()
+# --- CORE MATCHMAKING ---
+@bot.message_handler(func=lambda m: m.text == "🔍 Find Partner")
+def start_search(message):
+    u_id = message.from_user.id
+    user = get_user(u_id)
+    
+    if user['partner']: return bot.send_message(u_id, "❌ You are already in a chat!")
+
+    # 40-Second Penalty for Low Rating/Reported Users
+    if user['reports'] > 3:
+        bot.send_message(u_id, "⚠️ <b>System Penalty:</b> Due to reports, your search will take 40 seconds...")
+        time.sleep(40)
+
+    bot.send_message(u_id, "🔎 Searching for a partner...")
+    
+    # Matchmaking Logic
+    match = users.find_one({
+        "user_id": {"$ne": u_id},
+        "partner": None,
+        "gender": {"$ne": "Unknown"} # Basic filter
+    })
+
+    if match:
+        # Accept/Decline Logic
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Accept ✅", callback_data=f"acc_{match['user_id']}"),
+                   types.InlineKeyboardButton("Decline ❌", callback_data=f"dec_{match['user_id']}"))
+        bot.send_message(u_id, f"Match Found! <b>{match['name']}</b> ({match['age']}). Accept?", reply_markup=markup)
+    else:
+        bot.send_message(u_id, "No one found yet. Stay in the queue!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('acc_', 'dec_')))
+def handle_request(call):
+    u_id = call.from_user.id
+    target_id = int(call.data.split('_')[1])
+    
+    if "acc" in call.data:
+        users.update_one({"user_id": u_id}, {"$set": {"partner": target_id}})
+        users.update_one({"user_id": target_id}, {"$set": {"partner": u_id}})
+        bot.send_message(u_id, "✅ Connected! Use /stop to end.")
+        bot.send_message(target_id, "✅ Connected! Use /stop to end.")
+    else:
+        bot.send_message(u_id, "❌ Match declined.")
+
+# --- 3D GAMES ---
+@bot.message_handler(commands=['dice', 'basketball', 'slots'])
+def play_game(message):
+    user = get_user(message.from_user.id)
+    if user['coins'] < 20: return bot.send_message(message.chat.id, "Need 20 coins!")
+    
+    users.update_one({"user_id": user['user_id']}, {"$inc": {"coins": -20}})
+    
+    emoji_map = {'dice': '🎲', 'basketball': '🏀', 'slots': '🎰'}
+    game = message.text.replace('/', '')
+    res = bot.send_dice(message.chat.id, emoji=emoji_map.get(game, '🎲'))
+    
+    # Winning Logic
+    if res.dice.value >= 4:
+        users.update_one({"user_id": user['user_id']}, {"$inc": {"coins": 60}})
+        bot.reply_to(message, "🔥 <b>YOU WON!</b> +60 Coins.")
+    else:
+        bot.reply_to(message, "💀 You lost 20 coins.")
+
+# --- CHAT & LIMITS ---
+@bot.message_handler(content_types=['text', 'photo'])
+def chat_handler(message):
+    user = get_user(message.from_user.id)
+    if not user['partner']: return
+    
+    partner = get_user(user['partner'])
+
+    # Non-VIP Limits
+    if not user['is_vip']:
+        if message.text and user['daily_msgs'] >= 50:
+            return bot.send_message(user['user_id'], "🚫 Daily limit of 50 messages reached! Upgrade to VIP.")
+        if message.photo and user['daily_photos'] >= 5:
+            return bot.send_message(user['user_id'], "🚫 Daily limit of 5 photos reached!")
+
+    # Message Routing
+    if message.text:
+        translated = translate_msg(message.text, partner['lang'])
+        bot.send_message(partner['user_id'], f"💬 {translated}")
+        users.update_one({"user_id": user['user_id']}, {"$inc": {"daily_msgs": 1}})
+        
+    elif message.photo:
+        bot.send_photo(partner['user_id'], message.photo[-1].file_id, caption="📸 New Photo")
+        users.update_one({"user_id": user['user_id']}, {"$inc": {"daily_photos": 1}})
+
+# --- REFERRAL & DAILY ---
+@bot.message_handler(commands=['daily'])
+def daily_bonus(message):
+    user = get_user(message.from_user.id)
+    now = time.time()
+    if now - user['last_daily'] < 86400: return bot.reply_to(message, "Come back tomorrow!")
+    
+    reward = random.randint(100, 200)
+    users.update_one({"user_id": user['user_id']}, {"$inc": {"coins": reward}, "$set": {"last_daily": now}})
+    bot.reply_to(message, f"🎁 You claimed {reward} coins!")
+
+@bot.message_handler(commands=['referral'])
+def ref_link(message):
+    link = f"https://t.me/{(bot.get_me()).username}?start={message.from_user.id}"
+    bot.send_message(message.chat.id, f"🔗 Invite friends and get 500 coins!\nYour link: {link}")
+
+# --- ADMIN TOOLS ---
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    msg_text = message.text.replace('/broadcast ', '')
+    for u in users.find():
+        try: bot.send_message(u['user_id'], f"📢 <b>Announcement:</b>\n\n{msg_text}")
+        except: pass
+
+# --- START THREADS ---
+def run_bot():
+    while True:
+        try: bot.polling(none_stop=True)
+        except Exception: time.sleep(5)
+
+if __name__ == "__main__":
+    Thread(target=run_web).start()
+    run_bot()
