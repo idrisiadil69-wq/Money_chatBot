@@ -182,5 +182,21 @@ def handle_relay(msg):
         bot.send_message(uid, "❌ Not in a chat. Click 'Start Chat'", reply_markup=main_menu(uid))
 
 # Start the bot
+from flask import Flask
+from threading import Thread
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+# Run the web server in a separate thread
+t = Thread(target=run)
+t.start()
+
 print("Bot Started...")
 bot.infinity_polling()
