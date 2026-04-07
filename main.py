@@ -14,7 +14,7 @@ API_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI') 
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 
-# Threaded=False yahan Conflict error ko kam karne mein madad karega
+# Threaded=False Conflict 409 error ko rokne mein help karta hai
 bot = telebot.TeleBot(API_TOKEN, parse_mode='HTML', threaded=False)
 
 try:
@@ -55,7 +55,7 @@ def verify_payment_step(message):
     utr = message.text
     if utr and len(utr) == 12 and utr.isdigit():
         users.update_one({"user_id": message.from_user.id}, {"$set": {"is_vip": True}, "$inc": {"coins": 5000}})
-        bot.send_message(message.chat.id, "✅ <b>VIP Activated!</b>")
+        bot.send_message(message.chat.id, "✅ <b>VIP Activated!</b> Your balance increased by 5000 coins.")
     else:
         bot.send_message(message.chat.id, "❌ Invalid ID. Use /buy_vip to try again.")
 
@@ -84,7 +84,7 @@ def start_cmd(message):
         types.InlineKeyboardButton("📊 My Stats", callback_data="stats"),
         types.InlineKeyboardButton("❌ Stop Chat", callback_data="stop_chat")
     )
-    bot.send_message(u_id, "<b>🌟 WorldChat Master 🌟</b>", reply_markup=markup)
+    bot.send_message(u_id, "<b>🌟 WorldChat Master 🌟</b>\nConnect globally and translate instantly.", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
@@ -93,12 +93,12 @@ def handle_callbacks(call):
     bot.answer_callback_query(call.id)
 
     if call.data == "pay_now":
-        bot.send_message(u_id, "Send ₹99 to: <code>worldchat@upi</code>\nEnter 12-digit UTR:")
+        bot.send_message(u_id, "Send ₹99 to: <code>worldchat@upi</code>\nEnter 12-digit UTR/Transaction ID:")
         bot.register_next_step_handler(call.message, verify_payment_step)
 
     elif call.data == "start_chat":
         if user.get('partner'): return bot.send_message(u_id, "⚠️ Already in chat!")
-        bot.send_message(u_id, "🔎 Searching...")
+        bot.send_message(u_id, "🔎 Searching for a partner...")
         
         query = {"user_id": {"$ne": u_id}, "partner": None, "status": "idle"}
         if user.get('is_vip') and user.get('gender') != "Unknown":
@@ -107,22 +107,23 @@ def handle_callbacks(call):
         match = users.find_one_and_update(query, {"$set": {"partner": u_id, "status": "chatting"}})
         if match:
             users.update_one({"user_id": u_id}, {"$set": {"partner": match['user_id'], "status": "chatting"}})
-            bot.send_message(u_id, "✅ Connected!")
-            bot.send_message(match['user_id'], "✅ Connected!")
+            bot.send_message(u_id, "✅ <b>Connected!</b> You can now start chatting.")
+            bot.send_message(match['user_id'], "✅ <b>Connected!</b> You can now start chatting.")
         else:
             users.update_one({"user_id": u_id}, {"$set": {"status": "idle"}})
-            bot.send_message(u_id, "⏳ Finding partner...")
+            bot.send_message(u_id, "⏳ Waiting for someone to join...")
 
     elif call.data == "daily_coins":
         if time.time() - user.get('last_daily', 0) < 86400:
-            bot.send_message(u_id, "❌ Already claimed!")
+            bot.send_message(u_id, "❌ Already claimed today! Come back tomorrow.")
         else:
             reward = random.randint(50, 150)
             users.update_one({"user_id": u_id}, {"$inc": {"coins": reward}, "$set": {"last_daily": time.time()}})
             bot.send_message(u_id, f"🎁 Got {reward} coins!")
 
     elif call.data == "stats":
-        bot.send_message(u_id, f"💰 Coins: {user['coins']}\n⭐ VIP: {'Yes' if user['is_vip'] else 'No'}")
+        is_vip = "Yes ⭐" if user.get('is_vip') else "No"
+        bot.send_message(u_id, f"📊 <b>Your Stats</b>\n\n💰 Coins: {user.get('coins', 0)}\n⭐ VIP: {is_vip}\n🆔 ID: <code>{u_id}</code>")
 
     elif call.data == "stop_chat":
         if user.get('partner'):
@@ -130,6 +131,8 @@ def handle_callbacks(call):
             users.update_many({"user_id": {"$in": [u_id, p_id]}}, {"$set": {"partner": None, "status": "idle"}})
             bot.send_message(u_id, "❌ Chat ended.")
             bot.send_message(p_id, "❌ Partner disconnected.")
+        else:
+            bot.send_message(u_id, "You are not in a chat.")
 
 # --- [CHAT RELAY & TRANSLATE] ---
 @bot.message_handler(content_types=['text', 'photo', 'video', 'sticker', 'voice', 'animation', 'video_note'])
@@ -141,6 +144,7 @@ def relay_handler(message):
 
     try:
         if message.text:
+            # Auto-Translate logic
             translated = GoogleTranslator(source='auto', target=partner.get('lang', 'en')).translate(message.text)
             bot.send_message(p_id, f"💬 {translated}")
         elif message.photo: bot.send_photo(p_id, message.photo[-1].file_id, caption=message.caption)
@@ -148,7 +152,9 @@ def relay_handler(message):
         elif message.sticker: bot.send_sticker(p_id, message.sticker.file_id)
         elif message.animation: bot.send_animation(p_id, message.animation.file_id)
         elif message.voice: bot.send_voice(p_id, message.voice.file_id)
-    except:
+        elif message.video_note: bot.send_video_note(p_id, message.video_note.file_id)
+    except Exception:
+        # If partner blocked the bot, reset status
         users.update_many({"user_id": {"$in": [message.from_user.id, p_id]}}, {"$set": {"partner": None, "status": "idle"}})
 
 # --- [ADMIN DASHBOARD] ---
@@ -157,19 +163,18 @@ def admin_panel(message):
     if message.from_user.id != ADMIN_ID: return
     total = users.count_documents({})
     vips = users.count_documents({"is_vip": True})
-    bot.send_message(message.chat.id, f"📊 <b>Admin Dash</b>\n\nUsers: {total}\nVIPs: {vips}\nIncome: ₹{vips*99}")
+    bot.send_message(message.chat.id, f"📊 <b>Admin Dashboard</b>\n\nUsers: {total}\nVIPs: {vips}\nIncome: ₹{vips*99}")
 
-# --- [RUN] ---
+# --- [RUN BOT] ---
 def run_bot():
     bot.remove_webhook()
-    print("Bot is starting...")
+    print("Bot is starting... 🚀")
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
         except Exception:
-            time.sleep(10)
+            time.sleep(10) # Conflict hone par 10 sec ka wait
 
 if __name__ == "__main__":
     Thread(target=run_web).start()
     run_bot()
-    
